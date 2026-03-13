@@ -5,42 +5,42 @@
 //! poll the packages' latest versions by calling `RegistryPackage::pull_version()` on them,
 //! continue with doing whatever you wish.
 
-
-use git2::{self, ErrorCode as GitErrorCode, Config as GitConfig, Error as GitError, Cred as GitCred, RemoteCallbacks, CredentialType, FetchOptions,
-           ProxyOptions, Repository, Tree, Oid};
-use curl::easy::{WriteError as CurlWriteError, Handler as CurlHandler, SslOpt as CurlSslOpt, Easy2 as CurlEasy, List as CurlList};
-use semver::{VersionReq as SemverReq, Version as Semver};
+use curl::easy::{Easy2 as CurlEasy, Handler as CurlHandler, List as CurlList, SslOpt as CurlSslOpt, WriteError as CurlWriteError};
+use curl::multi::Multi as CurlMulti;
+use git2::{
+    self, Config as GitConfig, Cred as GitCred, CredentialType, Error as GitError, ErrorCode as GitErrorCode, FetchOptions, Oid, ProxyOptions, RemoteCallbacks,
+    Repository, Tree,
+};
+use hex;
 #[cfg(target_vendor = "apple")]
 use security_framework::os::macos::keychain::SecKeychain;
-#[cfg(target_os = "windows")]
-use windows::Win32::Security::Credentials as WinCred;
-use std::io::{self, ErrorKind as IoErrorKind, BufWriter, BufReader, BufRead, Write};
-use std::collections::{BTreeMap, BTreeSet};
-use std::{slice, cmp, env, mem, str, fs};
-use curl::multi::Multi as CurlMulti;
-use std::process::{Command, Stdio};
-use std::ffi::{OsString, OsStr};
-use std::path::{PathBuf, Path};
-use std::hash::{Hasher, Hash};
-use std::iter::FromIterator;
-#[cfg(target_os = "windows")]
-use windows::core::PCSTR;
-use std::time::Duration;
-#[cfg(all(unix, not(target_vendor = "apple")))]
-use std::sync::LazyLock;
+use semver::{Version as Semver, VersionReq as SemverReq};
 use serde_json as json;
 use std::borrow::Cow;
-use std::sync::Mutex;
+use std::collections::{BTreeMap, BTreeSet};
+use std::ffi::{OsStr, OsString};
+use std::hash::{Hash, Hasher};
+use std::io::{self, BufRead, BufReader, BufWriter, ErrorKind as IoErrorKind, Write};
+use std::iter::FromIterator;
+use std::path::{Path, PathBuf};
+use std::process::{Command, Stdio};
 #[cfg(any(target_os = "windows", all(unix, not(target_vendor = "apple"))))]
 use std::ptr;
-use url::Url;
+#[cfg(all(unix, not(target_vendor = "apple")))]
+use std::sync::LazyLock;
+use std::sync::Mutex;
+use std::time::Duration;
+use std::{cmp, env, fs, mem, slice, str};
 use toml;
-use hex;
+use url::Url;
+#[cfg(target_os = "windows")]
+use windows::core::PCSTR;
+#[cfg(target_os = "windows")]
+use windows::Win32::Security::Credentials as WinCred;
 
 mod config;
 
 pub use self::config::*;
-
 
 // cargo-audit 0.17.5 (registry+https://github.com/rust-lang/crates.io-index)
 // cargo-audit 0.17.5 (sparse+https://index.crates.io/)
@@ -69,7 +69,6 @@ fn parse_git_package_ident(ident: &str) -> Option<(&str, &str, &str)> {
     }
     Some((name, url, sha))
 }
-
 
 /// A representation of a package from the main [`crates.io`](https://crates.io) repository.
 ///
@@ -198,7 +197,6 @@ impl Hash for GitRepoPackage {
     }
 }
 
-
 impl RegistryPackage {
     /// Try to decypher a package descriptor into a `RegistryPackage`.
     ///
@@ -252,16 +250,14 @@ impl RegistryPackage {
     /// assert!(RegistryPackage::parse(package_s, vec!["treesize".to_string()]).is_none());
     /// ```
     pub fn parse(what: &str, executables: Vec<String>) -> Option<RegistryPackage> {
-        parse_registry_package_ident(what).map(|(name, version, registry)| {
-            RegistryPackage {
-                name: name.to_string(),
-                registry: registry.to_string().into(),
-                version: Some(Semver::parse(version).unwrap()),
-                newest_version: None,
-                alternative_version: None,
-                max_version: None,
-                executables: executables,
-            }
+        parse_registry_package_ident(what).map(|(name, version, registry)| RegistryPackage {
+            name: name.to_string(),
+            registry: registry.to_string().into(),
+            version: Some(Semver::parse(version).unwrap()),
+            newest_version: None,
+            alternative_version: None,
+            max_version: None,
+            executables: executables,
         })
     }
 
@@ -302,8 +298,9 @@ impl RegistryPackage {
         if let Some(newest) = vers.next() {
             self.newest_version = Some(newest.clone());
 
-            if self.newest_version.as_ref().unwrap().is_prerelease() &&
-               !self.want_to_install_prerelease(self.newest_version.as_ref().unwrap(), install_prereleases) {
+            if self.newest_version.as_ref().unwrap().is_prerelease()
+                && !self.want_to_install_prerelease(self.newest_version.as_ref().unwrap(), install_prereleases)
+            {
                 if let Some(newest_nonpre) = vers.find(|v| !v.is_prerelease()) {
                     mem::swap(&mut self.alternative_version, &mut self.newest_version);
                     self.newest_version = Some(newest_nonpre.clone());
@@ -429,13 +426,18 @@ impl RegistryPackage {
 
         let update_to_version = self.update_to_version();
 
-        (req.into_iter().zip(self.version.as_ref()).map(|(sr, cv)| !sr.matches(cv)).next().unwrap_or(true) ||
-         req.into_iter().zip(update_to_version).map(|(sr, uv)| sr.matches(uv)).next().unwrap_or(true)) &&
-        update_to_version.map(|upd_v| {
-                (!upd_v.is_prerelease() || self.want_to_install_prerelease(upd_v, install_prereleases)) &&
-                (self.version.is_none() || criterion(self.version.as_ref().unwrap(), upd_v, downdate))
-            })
-            .unwrap_or(false)
+        (req.into_iter()
+            .zip(self.version.as_ref())
+            .map(|(sr, cv)| !sr.matches(cv))
+            .next()
+            .unwrap_or(true)
+            || req.into_iter().zip(update_to_version).map(|(sr, uv)| sr.matches(uv)).next().unwrap_or(true))
+            && update_to_version
+                .map(|upd_v| {
+                    (!upd_v.is_prerelease() || self.want_to_install_prerelease(upd_v, install_prereleases))
+                        && (self.version.is_none() || criterion(self.version.as_ref().unwrap(), upd_v, downdate))
+                })
+                .unwrap_or(false)
     }
 
     /// Get package version to update to, or `None` if the crate has no newest version (was yanked)
@@ -471,7 +473,9 @@ impl RegistryPackage {
     /// # }
     /// ```
     pub fn update_to_version(&self) -> Option<&Semver> {
-        self.newest_version.as_ref().map(|new_v| cmp::min(new_v, self.max_version.as_ref().unwrap_or(new_v)))
+        self.newest_version
+            .as_ref()
+            .map(|new_v| cmp::min(new_v, self.max_version.as_ref().unwrap_or(new_v)))
     }
 }
 
@@ -570,27 +574,29 @@ impl GitRepoPackage {
                     git2::Remote::create_detached(self.url.clone()).and_then(|mut r| {
                         let mut cb = RemoteCallbacks::new();
                         cb.credentials(|a, b, c| creds(a, b, c));
-                        r.connect_auth(git2::Direction::Fetch,
-                                          Some(cb),
-                                          http_proxy.map(|http_proxy| proxy_options_from_proxy_url(&self.url, http_proxy)))
-                            .and_then(|rc| {
-                                rc.list()?
-                                    .into_iter()
-                                    .find(|rh| match self.branch.as_ref() {
-                                        Some(b) => {
-                                            if rh.name().starts_with("refs/heads/") {
-                                                rh.name()["refs/heads/".len()..] == b[..]
-                                            } else if rh.name().starts_with("refs/tags/") {
-                                                rh.name()["refs/tags/".len()..] == b[..]
-                                            } else {
-                                                false
-                                            }
+                        r.connect_auth(
+                            git2::Direction::Fetch,
+                            Some(cb),
+                            http_proxy.map(|http_proxy| proxy_options_from_proxy_url(&self.url, http_proxy)),
+                        )
+                        .and_then(|rc| {
+                            rc.list()?
+                                .into_iter()
+                                .find(|rh| match self.branch.as_ref() {
+                                    Some(b) => {
+                                        if rh.name().starts_with("refs/heads/") {
+                                            rh.name()["refs/heads/".len()..] == b[..]
+                                        } else if rh.name().starts_with("refs/tags/") {
+                                            rh.name()["refs/tags/".len()..] == b[..]
+                                        } else {
+                                            false
                                         }
-                                        None => rh.name() == "HEAD",
-                                    })
-                                    .map(|rh| rh.oid())
-                                    .ok_or(git2::Error::from_str(""))
-                            })
+                                    }
+                                    None => rh.name() == "HEAD",
+                                })
+                                .map(|rh| rh.oid())
+                                .ok_or(git2::Error::from_str(""))
+                        })
                     })
                 })
             };
@@ -601,7 +607,10 @@ impl GitRepoPackage {
 
         let repo = self.pull_version_repo(&clone_dir, http_proxy, fork_git);
 
-        self.newest_id = repo.and_then(|r| r.head().and_then(|h| h.target().ok_or_else(|| GitError::from_str("HEAD not a direct reference"))));
+        self.newest_id = repo.and_then(|r| {
+            r.head()
+                .and_then(|h| h.target().ok_or_else(|| GitError::from_str("HEAD not a direct reference")))
+        });
     }
 
     fn pull_version_fresh_clone(&self, clone_dir: &Path, http_proxy: Option<&str>, fork_git: bool) -> Result<Repository, GitError> {
@@ -614,10 +623,12 @@ impl GitRepoPackage {
                 .arg(clone_dir)
                 .status()
                 .map_err(|e| GitError::from_str(&e.to_string()))
-                .and_then(|e| if e.success() {
-                    Repository::open(clone_dir)
-                } else {
-                    Err(GitError::from_str(&e.to_string()))
+                .and_then(|e| {
+                    if e.success() {
+                        Repository::open(clone_dir)
+                    } else {
+                        Err(GitError::from_str(&e.to_string()))
+                    }
                 })
         } else {
             with_authentication(&self.url, |creds| {
@@ -646,15 +657,19 @@ impl GitRepoPackage {
                 Some(b) => {
                     // Cargo doesn't point the HEAD at the chosen (via "--branch") branch when installing
                     // https://github.com/nabijaczleweli/cargo-update/issues/143
-                    r.set_head(&format!("refs/heads/{}", b)).map_err(|e| panic!("Couldn't set HEAD to chosen branch {}: {}", b, e)).unwrap();
+                    r.set_head(&format!("refs/heads/{}", b))
+                        .map_err(|e| panic!("Couldn't set HEAD to chosen branch {}: {}", b, e))
+                        .unwrap();
                     (Cow::from(b), Cow::from(b))
                 }
 
                 None => {
-                    match r.find_reference("HEAD")
+                    match r
+                        .find_reference("HEAD")
                         .map_err(|e| panic!("No HEAD in {}: {}", clone_dir.display(), e))
                         .unwrap()
-                        .symbolic_target() {
+                        .symbolic_target()
+                    {
                         Some(ht) => (ht["refs/heads/".len()..].to_string().into(), "+HEAD:refs/remotes/origin/HEAD".into()),
                         None => {
                             // Versions up to v4.0.0 (well, 59be1c0de283dabce320a860a3d533d00910a6a9, but who's counting)
@@ -667,7 +682,6 @@ impl GitRepoPackage {
                             return self.pull_version_fresh_clone(clone_dir, http_proxy, fork_git);
                         }
                     }
-
                 }
             };
 
@@ -677,40 +691,42 @@ impl GitRepoPackage {
                     remote = &self.url;
                     r.remote_anonymous(&self.url)
                 })
-                .and_then(|mut rm| if fork_git {
-                    Command::new(env::var_os("GIT").as_ref().map(OsString::as_os_str).unwrap_or(OsStr::new("git")))
-                        .arg("-C")
-                        .arg(r.path())
-                        .args(&["fetch", remote, &tofetch])
-                        .status()
-                        .map_err(|e| GitError::from_str(&e.to_string()))
-                        .and_then(|e| if e.success() {
-                            Ok(())
-                        } else {
-                            Err(GitError::from_str(&e.to_string()))
-                        })
-                } else {
-                    with_authentication(&self.url, |creds| {
-                        let mut cb = RemoteCallbacks::new();
-                        cb.credentials(|a, b, c| creds(a, b, c));
+                .and_then(|mut rm| {
+                    if fork_git {
+                        Command::new(env::var_os("GIT").as_ref().map(OsString::as_os_str).unwrap_or(OsStr::new("git")))
+                            .arg("-C")
+                            .arg(r.path())
+                            .args(&["fetch", remote, &tofetch])
+                            .status()
+                            .map_err(|e| GitError::from_str(&e.to_string()))
+                            .and_then(|e| if e.success() { Ok(()) } else { Err(GitError::from_str(&e.to_string())) })
+                    } else {
+                        with_authentication(&self.url, |creds| {
+                            let mut cb = RemoteCallbacks::new();
+                            cb.credentials(|a, b, c| creds(a, b, c));
 
-                        rm.fetch(&[&tofetch[..]],
-                                 Some(&mut fetch_options_from_proxy_url_and_callbacks(&self.url, http_proxy, cb)),
-                                 None)
-                    })
+                            rm.fetch(
+                                &[&tofetch[..]],
+                                Some(&mut fetch_options_from_proxy_url_and_callbacks(&self.url, http_proxy, cb)),
+                                None,
+                            )
+                        })
+                    }
                 })
                 .map_err(|e| panic!("Fetching {} from {}: {}", clone_dir.display(), self.url, e))
                 .unwrap();
-            r.branch(&branch,
-                        &r.find_reference("FETCH_HEAD")
-                            .map_err(|e| panic!("No FETCH_HEAD in {}: {}", clone_dir.display(), e))
-                            .unwrap()
-                            .peel_to_commit()
-                            .map_err(|e| panic!("FETCH_HEAD not a commit in {}: {}", clone_dir.display(), e))
-                            .unwrap(),
-                        true)
-                .map_err(|e| panic!("Setting local branch {} in {}: {}", branch, clone_dir.display(), e))
-                .unwrap();
+            r.branch(
+                &branch,
+                &r.find_reference("FETCH_HEAD")
+                    .map_err(|e| panic!("No FETCH_HEAD in {}: {}", clone_dir.display(), e))
+                    .unwrap()
+                    .peel_to_commit()
+                    .map_err(|e| panic!("FETCH_HEAD not a commit in {}: {}", clone_dir.display(), e))
+                    .unwrap(),
+                true,
+            )
+            .map_err(|e| panic!("Setting local branch {} in {}: {}", branch, clone_dir.display(), e))
+            .unwrap();
             Ok(r)
         } else {
             // If we could not open the repository either it does not exist, or exists but is invalid,
@@ -753,7 +769,6 @@ impl GitRepoPackage {
     }
 }
 
-
 /// One of elements with which to filter required packages.
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
 pub enum PackageFilterElement {
@@ -777,7 +792,10 @@ impl PackageFilterElement {
     /// assert!(PackageFilterElement::parse("communism=good").is_err());
     /// ```
     pub fn parse(from: &str) -> Result<PackageFilterElement, String> {
-        let (key, value) = from.split_at(from.find('=').ok_or_else(|| format!(r#"Filter string "{}" does not contain the key/value separator "=""#, from))?);
+        let (key, value) = from.split_at(
+            from.find('=')
+                .ok_or_else(|| format!(r#"Filter string "{}" does not contain the key/value separator "=""#, from))?,
+        );
         let value = &value[1..];
 
         Ok(match key {
@@ -803,7 +821,6 @@ impl PackageFilterElement {
         }
     }
 }
-
 
 /// `cargo` configuration, as obtained from `.cargo/config[.toml]`
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
@@ -839,8 +856,10 @@ impl SparseRegistryConfig {
         SparseRegistryConfig::credential_provider_impl(&self.credential_aliases, v)
     }
 
-    fn credential_provider_impl(credential_aliases: &BTreeMap<CargoConfigEnvironmentNormalisedString, Vec<String>>, v: toml::Value)
-                                -> Option<SparseRegistryAuthProvider> {
+    fn credential_provider_impl(
+        credential_aliases: &BTreeMap<CargoConfigEnvironmentNormalisedString, Vec<String>>,
+        v: toml::Value,
+    ) -> Option<SparseRegistryAuthProvider> {
         match v {
             toml::Value::String(s) => Some(CargoConfig::string_provider(s, &credential_aliases)),
             toml::Value::Array(a) => Some(SparseRegistryAuthProvider::from_config(CargoConfig::string_array(a))),
@@ -917,7 +936,8 @@ impl CargoConfig {
             .ok()
             .and_then(|s| s.parse::<toml::Value>().ok());
 
-        let credential_aliases = None.or_else(|| match cfg.as_mut()?.as_table_mut()?.remove("credential-alias")? {
+        let credential_aliases = None
+            .or_else(|| match cfg.as_mut()?.as_table_mut()?.remove("credential-alias")? {
                 toml::Value::Table(t) => Some(t),
                 _ => None,
             })
@@ -925,52 +945,57 @@ impl CargoConfig {
             .into_iter()
             .flat_map(|(k, v)| {
                 match v {
-                        toml::Value::String(s) => Some(s.split(' ').map(String::from).collect()),
-                        toml::Value::Array(a) => Some(CargoConfig::string_array(a)),
-                        _ => None,
-                    }
-                    .map(|v| (CargoConfigEnvironmentNormalisedString::normalise(k), v))
+                    toml::Value::String(s) => Some(s.split(' ').map(String::from).collect()),
+                    toml::Value::Array(a) => Some(CargoConfig::string_array(a)),
+                    _ => None,
+                }
+                .map(|v| (CargoConfigEnvironmentNormalisedString::normalise(k), v))
             })
-            .chain(env::vars_os()
-                .map(|(k, v)| (k.into_encoded_bytes(), v))
-                .filter(|(k, _)| k.starts_with(b"CARGO_CREDENTIAL_ALIAS_"))
-                .filter(|(k, _)| k["CARGO_CREDENTIAL_ALIAS_".len()..].iter().all(|&b| !(b.is_ascii_lowercase() || b == b'.' || b == b'-')))
-                .flat_map(|(mut k, v)| {
-                    let k = String::from_utf8(k.drain("CARGO_CREDENTIAL_ALIAS_".len()..).collect()).ok()?;
-                    let v = v.into_string().ok()?;
-                    Some((CargoConfigEnvironmentNormalisedString(k), v.split(' ').map(String::from).collect()))
-                }))
+            .chain(
+                env::vars_os()
+                    .map(|(k, v)| (k.into_encoded_bytes(), v))
+                    .filter(|(k, _)| k.starts_with(b"CARGO_CREDENTIAL_ALIAS_"))
+                    .filter(|(k, _)| {
+                        k["CARGO_CREDENTIAL_ALIAS_".len()..]
+                            .iter()
+                            .all(|&b| !(b.is_ascii_lowercase() || b == b'.' || b == b'-'))
+                    })
+                    .flat_map(|(mut k, v)| {
+                        let k = String::from_utf8(k.drain("CARGO_CREDENTIAL_ALIAS_".len()..).collect()).ok()?;
+                        let v = v.into_string().ok()?;
+                        Some((CargoConfigEnvironmentNormalisedString(k), v.split(' ').map(String::from).collect()))
+                    }),
+            )
             .collect();
 
         CargoConfig {
             net_git_fetch_with_cli: env::var("CARGO_NET_GIT_FETCH_WITH_CLI")
                 .ok()
-                .and_then(|e| if e.is_empty() {
-                    Some(toml::Value::String(String::new()))
-                } else {
-                    e.parse::<toml::Value>().ok()
+                .and_then(|e| {
+                    if e.is_empty() {
+                        Some(toml::Value::String(String::new()))
+                    } else {
+                        e.parse::<toml::Value>().ok()
+                    }
                 })
-                .or_else(|| {
-                    cfg.as_mut()?
-                        .as_table_mut()?
-                        .get_mut("net")?
-                        .as_table_mut()?
-                        .remove("git-fetch-with-cli")
-                })
+                .or_else(|| cfg.as_mut()?.as_table_mut()?.get_mut("net")?.as_table_mut()?.remove("git-fetch-with-cli"))
                 .map(CargoConfig::truthy)
                 .unwrap_or(false),
             registries_crates_io_protocol_sparse: env::var("CARGO_REGISTRIES_CRATES_IO_PROTOCOL")
                 .map(|s| s == "sparse")
                 .ok()
                 .or_else(|| {
-                    Some(cfg.as_mut()?
-                        .as_table_mut()?
-                        .get_mut("registries")?
-                        .as_table_mut()?
-                        .get_mut("crates-io")?
-                        .as_table_mut()?
-                        .remove("protocol")?
-                        .as_str()? == "sparse")
+                    Some(
+                        cfg.as_mut()?
+                            .as_table_mut()?
+                            .get_mut("registries")?
+                            .as_table_mut()?
+                            .get_mut("crates-io")?
+                            .as_table_mut()?
+                            .remove("protocol")?
+                            .as_str()?
+                            == "sparse",
+                    )
                 })
                 // // Horrifically expensive (82-93ms end-to-end) and largely unnecessary
                 // .or_else(|| {
@@ -987,84 +1012,59 @@ impl CargoConfig {
             http: HttpCargoConfig {
                 cainfo: env::var_os("CARGO_HTTP_CAINFO")
                     .map(PathBuf::from)
-                    .or_else(|| {
-                        CargoConfig::string(cfg.as_mut()?
-                                .as_table_mut()?
-                                .get_mut("http")?
-                                .as_table_mut()?
-                                .remove("cainfo")?)
-                            .map(PathBuf::from)
-                    }),
+                    .or_else(|| CargoConfig::string(cfg.as_mut()?.as_table_mut()?.get_mut("http")?.as_table_mut()?.remove("cainfo")?).map(PathBuf::from)),
                 check_revoke: env::var("CARGO_HTTP_CHECK_REVOKE")
                     .ok()
                     .map(toml::Value::String)
-                    .or_else(|| {
-                        cfg.as_mut()?
-                            .as_table_mut()?
-                            .get_mut("http")?
-                            .as_table_mut()?
-                            .remove("check-revoke")
-                    })
+                    .or_else(|| cfg.as_mut()?.as_table_mut()?.get_mut("http")?.as_table_mut()?.remove("check-revoke"))
                     .map(CargoConfig::truthy)
                     .unwrap_or(cfg!(target_os = "windows")),
             },
             sparse_registries: SparseRegistryConfig {
                 // Supposedly this is CARGO_REGISTRY_GLOBAL_CREDENTIAL_PROVIDERS but they don't specify how they serialise arrays so
-                global_credential_providers: None.or_else(|| {
-                        CargoConfig::string_array_v(cfg.as_mut()?
-                            .as_table_mut()?
-                            .get_mut("registry")?
-                            .as_table_mut()?
-                            .remove("global-credential-providers")?)
+                global_credential_providers: None
+                    .or_else(|| {
+                        CargoConfig::string_array_v(
+                            cfg.as_mut()?
+                                .as_table_mut()?
+                                .get_mut("registry")?
+                                .as_table_mut()?
+                                .remove("global-credential-providers")?,
+                        )
                     })
                     .map(|a| a.into_iter().map(|s| CargoConfig::string_provider(s, &credential_aliases)).collect())
                     .unwrap_or_else(|| vec![SparseRegistryAuthProvider::TokenNoEnvironment]),
                 crates_io_credential_provider: env::var("CARGO_REGISTRY_CREDENTIAL_PROVIDER")
                     .ok()
                     .map(toml::Value::String)
-                    .or_else(|| {
-                        cfg.as_mut()?
-                            .as_table_mut()?
-                            .get_mut("registry")?
-                            .as_table_mut()?
-                            .remove("credential-provider")
-                    })
+                    .or_else(|| cfg.as_mut()?.as_table_mut()?.get_mut("registry")?.as_table_mut()?.remove("credential-provider"))
                     .and_then(|v| SparseRegistryConfig::credential_provider_impl(&credential_aliases, v)),
                 crates_io_token_env: env::var("CARGO_REGISTRY_TOKEN").ok(),
-                crates_io_token: None.or_else(|| {
-                        CargoConfig::string(creds.as_mut()?
-                            .as_table_mut()?
-                            .get_mut("registry")?
-                            .as_table_mut()?
-                            .remove("token")?)
-                    })
-                    .or_else(|| {
-                        CargoConfig::string(cfg.as_mut()?
-                            .as_table_mut()?
-                            .get_mut("registry")?
-                            .as_table_mut()?
-                            .remove("token")?)
-                    }),
+                crates_io_token: None
+                    .or_else(|| CargoConfig::string(creds.as_mut()?.as_table_mut()?.get_mut("registry")?.as_table_mut()?.remove("token")?))
+                    .or_else(|| CargoConfig::string(cfg.as_mut()?.as_table_mut()?.get_mut("registry")?.as_table_mut()?.remove("token")?)),
                 registry_tokens_env: env::vars_os()
                     .map(|(k, v)| (k.into_encoded_bytes(), v))
                     .filter(|(k, _)| k.starts_with(b"CARGO_REGISTRIES_") && k.ends_with(b"_TOKEN"))
                     .filter(|(k, _)| {
-                        k["CARGO_REGISTRIES_".len()..k.len() - b"_TOKEN".len()].iter().all(|&b| !(b.is_ascii_lowercase() || b == b'.' || b == b'-'))
+                        k["CARGO_REGISTRIES_".len()..k.len() - b"_TOKEN".len()]
+                            .iter()
+                            .all(|&b| !(b.is_ascii_lowercase() || b == b'.' || b == b'-'))
                     })
                     .flat_map(|(mut k, v)| {
                         let k = String::from_utf8(k.drain("CARGO_REGISTRIES_".len()..k.len() - b"_TOKEN".len()).collect()).ok()?;
                         Some((CargoConfigEnvironmentNormalisedString(k), v.into_string().ok()?))
                     })
                     .collect(),
-                registry_tokens: cfg.as_mut()
+                registry_tokens: cfg
+                    .as_mut()
                     .into_iter()
                     .chain(creds.as_mut())
-                    .flat_map(|c| {
-                        c.as_table_mut()?
-                            .get_mut("registries")?
-                            .as_table_mut()
+                    .flat_map(|c| c.as_table_mut()?.get_mut("registries")?.as_table_mut())
+                    .flat_map(|r| {
+                        r.into_iter()
+                            .flat_map(|(name, v)| Some((name.clone(), CargoConfig::string(v.as_table_mut()?.remove("token")?)?)))
                     })
-                    .flat_map(|r| r.into_iter().flat_map(|(name, v)| Some((name.clone(), CargoConfig::string(v.as_table_mut()?.remove("token")?)?))))
                     .collect(),
                 credential_aliases: credential_aliases,
             },
@@ -1075,8 +1075,7 @@ impl CargoConfig {
         match v {
             toml::Value::String(ref s) if s == "" => false,
             toml::Value::Float(0.) => false,
-            toml::Value::Integer(0) |
-            toml::Value::Boolean(false) => false,
+            toml::Value::Integer(0) | toml::Value::Boolean(false) => false,
             _ => true,
         }
     }
@@ -1102,17 +1101,10 @@ impl CargoConfig {
     fn string_provider(s: String, credential_aliases: &BTreeMap<CargoConfigEnvironmentNormalisedString, Vec<String>>) -> SparseRegistryAuthProvider {
         match credential_aliases.get(&CargoConfigEnvironmentNormalisedString::normalise(s.clone())) {
             Some(av) => SparseRegistryAuthProvider::Provider(av.clone()),
-            None => {
-                SparseRegistryAuthProvider::from_config(if s.contains(' ') {
-                    s.split(' ').map(String::from).collect()
-                } else {
-                    vec![s]
-                })
-            }
+            None => SparseRegistryAuthProvider::from_config(if s.contains(' ') { s.split(' ').map(String::from).collect() } else { vec![s] }),
         }
     }
 }
-
 
 /// [Follow `install.root`](https://github.com/nabijaczleweli/cargo-update/issues/23) in the `config` or `config.toml` file
 /// in the cargo directory specified.
@@ -1146,7 +1138,8 @@ fn crates_file_in_impl<'cd>(cargo_dir: &'cd Path, mut seen: BTreeSet<&'cd Path>)
             .get("install")
             .and_then(|t| t.as_table())
             .and_then(|t| t.get("root"))
-            .and_then(|t| t.as_str()) {
+            .and_then(|t| t.as_str())
+        {
             return crates_file_in_impl(Path::new(idir), seen);
         }
     }
@@ -1157,7 +1150,14 @@ fn crates_file_in_impl<'cd>(cargo_dir: &'cd Path, mut seen: BTreeSet<&'cd Path>)
 
 fn installed_packages_table(crates_file: &Path) -> Option<toml::Table> {
     let crates_data = fs::read_to_string(crates_file).ok()?;
-    Some(toml::from_str::<toml::Value>(&crates_data).unwrap().get_mut("v1")?.as_table_mut().map(mem::take).unwrap())
+    Some(
+        toml::from_str::<toml::Value>(&crates_data)
+            .unwrap()
+            .get_mut("v1")?
+            .as_table_mut()
+            .map(mem::take)
+            .unwrap(),
+    )
 }
 
 /// List the installed packages at the specified location that originate
@@ -1185,7 +1185,8 @@ pub fn installed_registry_packages(crates_file: &Path) -> Vec<RegistryPackage> {
     for pkg in installed_packages_table(crates_file)
         .into_iter()
         .flatten()
-        .flat_map(|(s, x)| CargoConfig::string_array_v(x).and_then(|x| RegistryPackage::parse(&s, x))) {
+        .flat_map(|(s, x)| CargoConfig::string_array_v(x).and_then(|x| RegistryPackage::parse(&s, x)))
+    {
         if let Some(saved) = res.iter_mut().find(|p| p.name == pkg.name) {
             if saved.version.is_none() || saved.version.as_ref().unwrap() < pkg.version.as_ref().unwrap() {
                 saved.version = pkg.version;
@@ -1221,7 +1222,8 @@ pub fn installed_git_repo_packages(crates_file: &Path) -> Vec<GitRepoPackage> {
     for pkg in installed_packages_table(crates_file)
         .into_iter()
         .flatten()
-        .flat_map(|(s, x)| CargoConfig::string_array_v(x).and_then(|x| GitRepoPackage::parse(&s, x))) {
+        .flat_map(|(s, x)| CargoConfig::string_array_v(x).and_then(|x| GitRepoPackage::parse(&s, x)))
+    {
         if let Some(saved) = res.iter_mut().find(|p| p.name == pkg.name) {
             saved.id = pkg.id;
             continue;
@@ -1262,17 +1264,25 @@ pub fn installed_git_repo_packages(crates_file: &Path) -> Vec<GitRepoPackage> {
 /// #     RegistryPackage::parse("racer 1.2.10 (registry+https://github.com/rust-lang/crates.io-index)",
 /// #                            vec!["racer.exe".to_string()]).unwrap()]);
 /// ```
-pub fn intersect_packages(installed: &[RegistryPackage], to_update: &[(String, Option<Semver>, Cow<'static, str>)], allow_installs: bool,
-                          installed_git: &[GitRepoPackage])
-                          -> Vec<RegistryPackage> {
-    installed.iter()
+pub fn intersect_packages(
+    installed: &[RegistryPackage],
+    to_update: &[(String, Option<Semver>, Cow<'static, str>)],
+    allow_installs: bool,
+    installed_git: &[GitRepoPackage],
+) -> Vec<RegistryPackage> {
+    installed
+        .iter()
         .filter(|p| to_update.iter().any(|u| p.name == u.0))
         .cloned()
-        .map(|p| RegistryPackage { max_version: to_update.iter().find(|u| p.name == u.0).and_then(|u| u.1.clone()), ..p })
-        .chain(to_update.iter()
-            .filter(|p| allow_installs && !installed.iter().any(|i| i.name == p.0) && !installed_git.iter().any(|i| i.name == p.0))
-            .map(|p| {
-                RegistryPackage {
+        .map(|p| RegistryPackage {
+            max_version: to_update.iter().find(|u| p.name == u.0).and_then(|u| u.1.clone()),
+            ..p
+        })
+        .chain(
+            to_update
+                .iter()
+                .filter(|p| allow_installs && !installed.iter().any(|i| i.name == p.0) && !installed_git.iter().any(|i| i.name == p.0))
+                .map(|p| RegistryPackage {
                     name: p.0.clone(),
                     registry: p.2.clone(),
                     version: None,
@@ -1280,8 +1290,8 @@ pub fn intersect_packages(installed: &[RegistryPackage], to_update: &[(String, O
                     alternative_version: None,
                     max_version: p.1.clone(),
                     executables: vec![],
-                }
-            }))
+                }),
+        )
         .collect()
 }
 
@@ -1302,18 +1312,20 @@ pub fn intersect_packages(installed: &[RegistryPackage], to_update: &[(String, O
 /// }
 /// ```
 pub fn crate_versions(buf: &[u8]) -> Result<Vec<Semver>, Cow<'static, str>> {
-    buf.split(|&b| b == b'\n').filter(|l| !l.is_empty()).try_fold(vec![], |mut acc, p| match json::from_slice(p).map_err(|e| e.to_string())? {
-        json::Value::Object(o) => {
-            if !matches!(o.get("yanked"), Some(&json::Value::Bool(true))) {
-                match o.get("vers").ok_or("no \"vers\" key")? {
-                    json::Value::String(ref v) => acc.push(Semver::parse(&v).map_err(|e| e.to_string())?),
-                    _ => Err("\"vers\" not string")?,
+    buf.split(|&b| b == b'\n')
+        .filter(|l| !l.is_empty())
+        .try_fold(vec![], |mut acc, p| match json::from_slice(p).map_err(|e| e.to_string())? {
+            json::Value::Object(o) => {
+                if !matches!(o.get("yanked"), Some(&json::Value::Bool(true))) {
+                    match o.get("vers").ok_or("no \"vers\" key")? {
+                        json::Value::String(ref v) => acc.push(Semver::parse(&v).map_err(|e| e.to_string())?),
+                        _ => Err("\"vers\" not string")?,
+                    }
                 }
+                Ok(acc)
             }
-            Ok(acc)
-        }
-        _ => Err(Cow::from("line not object")),
-    })
+            _ => Err(Cow::from("line not object")),
+        })
 }
 
 /// Get the location of the registry index corresponding ot the given URL; if not present – make it and its parents.
@@ -1367,219 +1379,234 @@ pub fn assert_index_path(cargo_dir: &Path, registry_url: &str, sparse: bool) -> 
 /// Error type distinguishes init error from open error.
 pub fn open_index_repository(registry: &Path, sparse: bool) -> Result<Registry, (bool, GitError)> {
     match sparse {
-        false => {
-            Repository::open(&registry).map(Registry::Git).or_else(|e| if e.code() == GitErrorCode::NotFound {
+        false => Repository::open(&registry).map(Registry::Git).or_else(|e| {
+            if e.code() == GitErrorCode::NotFound {
                 Repository::init(&registry).map(Registry::Git).map_err(|e| (true, e))
             } else {
                 Err((false, e))
-            })
-        }
+            }
+        }),
         true => Ok(Registry::Sparse(BTreeMap::new())),
     }
 }
 
 #[derive(Debug, Clone, Hash, PartialEq, Eq, PartialOrd, Ord)]
-pub struct SparseRegistryAuthProviderBundle<'sr>(pub Cow<'sr, [SparseRegistryAuthProvider]>,
-                                                 pub &'sr OsStr,
-                                                 pub &'sr str,
-                                                 pub Cow<'sr, str>,
-                                                 pub Option<&'sr str>,
-                                                 pub Option<&'sr str>);
+pub struct SparseRegistryAuthProviderBundle<'sr>(
+    pub Cow<'sr, [SparseRegistryAuthProvider]>,
+    pub &'sr OsStr,
+    pub &'sr str,
+    pub Cow<'sr, str>,
+    pub Option<&'sr str>,
+    pub Option<&'sr str>,
+);
 impl<'sr> SparseRegistryAuthProviderBundle<'sr> {
     pub fn try(&self) -> Option<Cow<'sr, str>> {
         let (install_cargo, repo_name, repo_url, token_env, token) = (self.1, self.2, &self.3, self.4, self.5);
-        self.0
-            .iter()
-            .rev()
-            .find_map(|p| match p {
-                SparseRegistryAuthProvider::TokenNoEnvironment => token.map(Cow::from),
-                SparseRegistryAuthProvider::Token => token_env.or(token).map(Cow::from),
-                SparseRegistryAuthProvider::Wincred => {
-                    #[allow(unused_mut)]
-                    let mut ret = None;
-                    #[cfg(target_os="windows")]
-                    unsafe {
-                        let mut cred = ptr::null_mut();
-                        if WinCred::CredReadA(PCSTR(format!("cargo-registry:{}\0", repo_url).as_ptr()),
-                                              WinCred::CRED_TYPE_GENERIC,
-                                              None,
-                                              &mut cred)
-                            .is_ok() {
-                            ret = str::from_utf8(slice::from_raw_parts((*cred).CredentialBlob, (*cred).CredentialBlobSize as usize))
+        self.0.iter().rev().find_map(|p| match p {
+            SparseRegistryAuthProvider::TokenNoEnvironment => token.map(Cow::from),
+            SparseRegistryAuthProvider::Token => token_env.or(token).map(Cow::from),
+            SparseRegistryAuthProvider::Wincred => {
+                #[allow(unused_mut)]
+                let mut ret = None;
+                #[cfg(target_os = "windows")]
+                unsafe {
+                    let mut cred = ptr::null_mut();
+                    if WinCred::CredReadA(
+                        PCSTR(format!("cargo-registry:{}\0", repo_url).as_ptr()),
+                        WinCred::CRED_TYPE_GENERIC,
+                        None,
+                        &mut cred,
+                    )
+                    .is_ok()
+                    {
+                        ret = str::from_utf8(slice::from_raw_parts((*cred).CredentialBlob, (*cred).CredentialBlobSize as usize))
+                            .map(str::to_string)
+                            .map(Cow::from)
+                            .ok();
+                        WinCred::CredFree(cred as _);
+                    }
+                }
+                ret
+            }
+            SparseRegistryAuthProvider::MacosKeychain => {
+                #[allow(unused_mut, unused_assignments)]
+                let mut ret = None;
+                #[cfg(target_vendor = "apple")]
+                {
+                    ret = SecKeychain::default()
+                        .and_then(|k| k.find_generic_password(&format!("cargo-registry:{}", repo_url), ""))
+                        .ok()
+                        .and_then(|(p, _)| str::from_utf8(&*p).map(str::to_string).map(Cow::from).ok());
+                }
+                ret
+            }
+            SparseRegistryAuthProvider::Libsecret => {
+                #[allow(unused_mut)]
+                let mut ret = None;
+                #[cfg(all(unix, not(target_vendor = "apple")))]
+                #[allow(non_camel_case_types)]
+                unsafe {
+                    #[repr(C)]
+                    struct SecretSchemaAttribute {
+                        name: *const u8,
+                        flags: libc::c_int, // SECRET_SCHEMA_ATTRIBUTE_STRING = 0
+                    }
+                    #[repr(C)]
+                    struct SecretSchema {
+                        name: *const u8,
+                        flags: libc::c_int,
+                        attributes: [SecretSchemaAttribute; 32],
+                        reserved: libc::c_int,
+                        reserved1: *const (),
+                        reserved2: *const (),
+                        reserved3: *const (),
+                        reserved4: *const (),
+                        reserved5: *const (),
+                        reserved6: *const (),
+                        reserved7: *const (),
+                    }
+                    unsafe impl Sync for SecretSchema {}
+                    type secret_password_lookup_sync_t = extern "C" fn(*const SecretSchema, *mut (), *mut (), ...) -> *mut u8;
+                    type secret_password_free_t = extern "C" fn(*mut u8);
+
+                    static LIBSECRET: LazyLock<Option<(secret_password_lookup_sync_t, secret_password_free_t)>> = LazyLock::new(|| unsafe {
+                        let libsecret = libc::dlopen(b"libsecret-1.so.0\0".as_ptr() as _, libc::RTLD_LAZY);
+                        if libsecret.is_null() {
+                            return None;
+                        }
+                        let lookup = libc::dlsym(libsecret, b"secret_password_lookup_sync\0".as_ptr() as _);
+                        let free = libc::dlsym(libsecret, b"secret_password_free\0".as_ptr() as _);
+                        if lookup.is_null() || free.is_null() {
+                            libc::dlclose(libsecret);
+                            return None;
+                        }
+                        Some((mem::transmute(lookup), mem::transmute(free)))
+                    });
+                    static SCHEMA: SecretSchema = unsafe {
+                        let mut schema: SecretSchema = mem::zeroed();
+                        schema.name = b"org.rust-lang.cargo.registry\0".as_ptr() as _;
+                        schema.attributes[0].name = b"url\0".as_ptr() as _;
+                        schema
+                    };
+
+                    if let Some((lookup, free)) = *LIBSECRET {
+                        let pass = lookup(
+                            &SCHEMA,
+                            ptr::null_mut(),
+                            ptr::null_mut(),
+                            b"url\0".as_ptr(),
+                            format!("{}\0", repo_url).as_ptr(),
+                            ptr::null() as *const u8,
+                        );
+                        if !pass.is_null() {
+                            ret = str::from_utf8(slice::from_raw_parts(pass, libc::strlen(pass as _)))
                                 .map(str::to_string)
                                 .map(Cow::from)
                                 .ok();
-                            WinCred::CredFree(cred as _);
+                            free(pass);
                         }
                     }
-                    ret
                 }
-                SparseRegistryAuthProvider::MacosKeychain => {
-                    #[allow(unused_mut, unused_assignments)]
-                    let mut ret = None;
-                    #[cfg(target_vendor = "apple")]
+                ret
+            }
+            SparseRegistryAuthProvider::TokenFromStdout(args) => Command::new(&args[0])
+                .args(&args[1..])
+                .env("CARGO", install_cargo)
+                .env("CARGO_REGISTRY_INDEX_URL", &repo_url[..])
+                .env("CARGO_REGISTRY_NAME_OPT", repo_name)
+                .stdin(Stdio::inherit())
+                .stderr(Stdio::inherit())
+                .output()
+                .ok()
+                .filter(|o| o.status.success())
+                .map(|o| o.stdout)
+                .and_then(|o| String::from_utf8(o).ok())
+                .map(|mut o| {
+                    o.replace_range(o.rfind(|c| c != '\n').unwrap_or(o.len()) + 1..o.len(), "");
+                    o.replace_range(0..o.find(|c| c != '\n').unwrap_or(0), "");
+                    o.into()
+                }),
+            SparseRegistryAuthProvider::Provider(args) => Command::new(&args[0])
+                .arg("--cargo-plugin")
+                .stdin(Stdio::piped())
+                .stdout(Stdio::piped())
+                .spawn()
+                .ok()
+                .and_then(|mut child| {
+                    let mut stdin = BufWriter::new(child.stdin.take().unwrap());
+                    let mut stdout = BufReader::new(child.stdout.take().unwrap());
+
+                    let mut l = String::new();
+                    stdout.read_line(&mut l).map_err(|_| child.kill()).ok()?;
                     {
-                        ret = SecKeychain::default()
-                            .and_then(|k| k.find_generic_password(&format!("cargo-registry:{}", repo_url), ""))
-                            .ok()
-                            .and_then(|(p, _)| str::from_utf8(&*p).map(str::to_string).map(Cow::from).ok());
+                        let mut hello: json::Value = json::from_str(&l).map_err(|_| child.kill()).ok()?;
+                        hello
+                            .as_object_mut()
+                            .and_then(|h| h.remove("v"))
+                            .and_then(|mut v| v.as_array_mut().filter(|vs| vs.contains(&json::Value::Number(1.into()))).map(drop))
+                            .ok_or_else(|| child.kill())
+                            .ok()?;
                     }
-                    ret
-                }
-                SparseRegistryAuthProvider::Libsecret => {
-                    #[allow(unused_mut)]
-                    let mut ret = None;
-                    #[cfg(all(unix, not(target_vendor = "apple")))]
-                    #[allow(non_camel_case_types)]
-                    unsafe {
-                        #[repr(C)]
-                        struct SecretSchemaAttribute {
-                            name: *const u8,
-                            flags: libc::c_int, // SECRET_SCHEMA_ATTRIBUTE_STRING = 0
-                        }
-                        #[repr(C)]
-                        struct SecretSchema {
-                            name: *const u8,
-                            flags: libc::c_int,
-                            attributes: [SecretSchemaAttribute; 32],
-                            reserved: libc::c_int,
-                            reserved1: *const (),
-                            reserved2: *const (),
-                            reserved3: *const (),
-                            reserved4: *const (),
-                            reserved5: *const (),
-                            reserved6: *const (),
-                            reserved7: *const (),
-                        }
-                        unsafe impl Sync for SecretSchema {}
-                        type secret_password_lookup_sync_t = extern "C" fn(*const SecretSchema, *mut (), *mut (), ...) -> *mut u8;
-                        type secret_password_free_t = extern "C" fn(*mut u8);
 
-                        static LIBSECRET: LazyLock<Option<(secret_password_lookup_sync_t, secret_password_free_t)>> = LazyLock::new(|| unsafe {
-                            let libsecret = libc::dlopen(b"libsecret-1.so.0\0".as_ptr() as _, libc::RTLD_LAZY);
-                            if libsecret.is_null() {
-                                return None;
-                            }
-                            let lookup = libc::dlsym(libsecret, b"secret_password_lookup_sync\0".as_ptr() as _);
-                            let free = libc::dlsym(libsecret, b"secret_password_free\0".as_ptr() as _);
-                            if lookup.is_null() || free.is_null() {
-                                libc::dlclose(libsecret);
-                                return None;
-                            }
-                            Some((mem::transmute(lookup), mem::transmute(free)))
-                        });
-                        static SCHEMA: SecretSchema = unsafe {
-                            let mut schema: SecretSchema = mem::zeroed();
-                            schema.name = b"org.rust-lang.cargo.registry\0".as_ptr() as _;
-                            schema.attributes[0].name = b"url\0".as_ptr() as _;
-                            schema
-                        };
-
-                        if let Some((lookup, free)) = *LIBSECRET {
-                            let pass = lookup(&SCHEMA,
-                                              ptr::null_mut(),
-                                              ptr::null_mut(),
-                                              b"url\0".as_ptr(),
-                                              format!("{}\0", repo_url).as_ptr(),
-                                              ptr::null() as *const u8);
-                            if !pass.is_null() {
-                                ret = str::from_utf8(slice::from_raw_parts(pass, libc::strlen(pass as _))).map(str::to_string).map(Cow::from).ok();
-                                free(pass);
-                            }
-                        }
-                    }
-                    ret
-                }
-                SparseRegistryAuthProvider::TokenFromStdout(args) => {
-                    Command::new(&args[0])
-                        .args(&args[1..])
-                        .env("CARGO", install_cargo)
-                        .env("CARGO_REGISTRY_INDEX_URL", &repo_url[..])
-                        .env("CARGO_REGISTRY_NAME_OPT", repo_name)
-                        .stdin(Stdio::inherit())
-                        .stderr(Stdio::inherit())
-                        .output()
-                        .ok()
-                        .filter(|o| o.status.success())
-                        .map(|o| o.stdout)
-                        .and_then(|o| String::from_utf8(o).ok())
-                        .map(|mut o| {
-                            o.replace_range(o.rfind(|c| c != '\n').unwrap_or(o.len()) + 1..o.len(), "");
-                            o.replace_range(0..o.find(|c| c != '\n').unwrap_or(0), "");
-                            o.into()
-                        })
-                }
-                SparseRegistryAuthProvider::Provider(args) => {
-                    Command::new(&args[0])
-                        .arg("--cargo-plugin")
-                        .stdin(Stdio::piped())
-                        .stdout(Stdio::piped())
-                        .spawn()
-                        .ok()
-                        .and_then(|mut child| {
-                            let mut stdin = BufWriter::new(child.stdin.take().unwrap());
-                            let mut stdout = BufReader::new(child.stdout.take().unwrap());
-
-                            let mut l = String::new();
-                            stdout.read_line(&mut l).map_err(|_| child.kill()).ok()?;
-                            {
-                                let mut hello: json::Value = json::from_str(&l).map_err(|_| child.kill()).ok()?;
-                                hello.as_object_mut()
-                                    .and_then(|h| h.remove("v"))
-                                    .and_then(|mut v| v.as_array_mut().filter(|vs| vs.contains(&json::Value::Number(1.into()))).map(drop))
-                                    .ok_or_else(|| child.kill())
-                                    .ok()?;
-                            }
-
-                            let req = json::Value::Object({
+                    let req = json::Value::Object({
+                        let mut kv = json::Map::new();
+                        kv.insert("v".to_string(), json::Value::Number(1.into()));
+                        kv.insert(
+                            "registry".to_string(),
+                            json::Value::Object({
                                 let mut kv = json::Map::new();
-                                kv.insert("v".to_string(), json::Value::Number(1.into()));
-                                kv.insert("registry".to_string(),
-                                          json::Value::Object({
-                                              let mut kv = json::Map::new();
-                                              kv.insert("index-url".to_string(), json::Value::String(repo_url.to_string()));
-                                              kv.insert("name".to_string(), json::Value::String(repo_name.to_string()));
-                                              kv
-                                          }));
-                                kv.insert("kind".to_string(), json::Value::String("get".to_string()));
-                                kv.insert("operation".to_string(), json::Value::String("read".to_string()));
-                                kv.insert("args".to_string(),
-                                          json::Value::Array(args.into_iter().skip(1).cloned().map(json::Value::String).collect()));
+                                kv.insert("index-url".to_string(), json::Value::String(repo_url.to_string()));
+                                kv.insert("name".to_string(), json::Value::String(repo_name.to_string()));
                                 kv
-                            });
-                            json::to_writer(&mut stdin, &req).map_err(|_| child.kill()).ok()?;
-                            stdin.write_all(b"\n").map_err(|_| child.kill()).ok()?;
-                            stdin.flush().map_err(|_| child.kill()).ok()?;
+                            }),
+                        );
+                        kv.insert("kind".to_string(), json::Value::String("get".to_string()));
+                        kv.insert("operation".to_string(), json::Value::String("read".to_string()));
+                        kv.insert(
+                            "args".to_string(),
+                            json::Value::Array(args.into_iter().skip(1).cloned().map(json::Value::String).collect()),
+                        );
+                        kv
+                    });
+                    json::to_writer(&mut stdin, &req).map_err(|_| child.kill()).ok()?;
+                    stdin.write_all(b"\n").map_err(|_| child.kill()).ok()?;
+                    stdin.flush().map_err(|_| child.kill()).ok()?;
 
-                            l.clear();
-                            stdout.read_line(&mut l).map_err(|_| child.kill()).ok()?;
-                            let mut res: json::Value = json::from_str(&l).map_err(|_| child.kill()).ok()?;
-                            match res.as_object_mut()
-                                .and_then(|h| h.remove("Ok"))
-                                .and_then(|mut ok| ok.as_object_mut().and_then(|ok| ok.remove("token"))) {
-                                Some(json::Value::String(tok)) => Some(tok.into()),
-                                Some(_) => {
-                                    let _ = child.kill();
-                                    None
-                                }
-                                None => {
-                                    let _ = io::stderr()
-                                        .write_all(b"\n")
-                                        .ok()
-                                        .and_then(|_| json::to_writer(&mut io::stderr(), &res).ok().and_then(|_| io::stderr().write_all(b"\n").ok()));
-                                    None
-                                }
-                            }
-                        })
-                }
-            })
+                    l.clear();
+                    stdout.read_line(&mut l).map_err(|_| child.kill()).ok()?;
+                    let mut res: json::Value = json::from_str(&l).map_err(|_| child.kill()).ok()?;
+                    match res
+                        .as_object_mut()
+                        .and_then(|h| h.remove("Ok"))
+                        .and_then(|mut ok| ok.as_object_mut().and_then(|ok| ok.remove("token")))
+                    {
+                        Some(json::Value::String(tok)) => Some(tok.into()),
+                        Some(_) => {
+                            let _ = child.kill();
+                            None
+                        }
+                        None => {
+                            let _ = io::stderr()
+                                .write_all(b"\n")
+                                .ok()
+                                .and_then(|_| json::to_writer(&mut io::stderr(), &res).ok().and_then(|_| io::stderr().write_all(b"\n").ok()));
+                            None
+                        }
+                    }
+                }),
+        })
     }
 }
 
 /// Collect everything needed to get an authentication token for the given registry.
-pub fn auth_providers<'sr>(crates_file: &Path, install_cargo: Option<&'sr OsStr>, sparse_registries: &'sr SparseRegistryConfig, sparse: bool,
-                           repo_name: &'sr str, repo_url: &'sr str)
-                           -> SparseRegistryAuthProviderBundle<'sr> {
+pub fn auth_providers<'sr>(
+    crates_file: &Path,
+    install_cargo: Option<&'sr OsStr>,
+    sparse_registries: &'sr SparseRegistryConfig,
+    sparse: bool,
+    repo_name: &'sr str,
+    repo_url: &'sr str,
+) -> SparseRegistryAuthProviderBundle<'sr> {
     let cargo = install_cargo.unwrap_or(OsStr::new("cargo"));
     if !sparse {
         return SparseRegistryAuthProviderBundle(vec![].into(), cargo, "!sparse", "!sparse".into(), None, None);
@@ -1590,12 +1617,14 @@ pub fn auth_providers<'sr>(crates_file: &Path, install_cargo: Option<&'sr OsStr>
             Some(prov) => slice::from_ref(prov).into(),
             None => sparse_registries.global_credential_providers[..].into(),
         };
-        return SparseRegistryAuthProviderBundle(ret,
-                                                cargo,
-                                                repo_name,
-                                                format!("sparse+{}", repo_url).into(),
-                                                sparse_registries.crates_io_token_env.as_deref(),
-                                                sparse_registries.crates_io_token.as_deref());
+        return SparseRegistryAuthProviderBundle(
+            ret,
+            cargo,
+            repo_name,
+            format!("sparse+{}", repo_url).into(),
+            sparse_registries.crates_io_token_env.as_deref(),
+            sparse_registries.crates_io_token.as_deref(),
+        );
     }
 
     // Supposedly this is
@@ -1607,27 +1636,34 @@ pub fn auth_providers<'sr>(crates_file: &Path, install_cargo: Option<&'sr OsStr>
         .ok()
         .and_then(|s| s.parse::<toml::Value>().ok())
         .and_then(|mut c| {
-            sparse_registries.credential_provider(c.as_table_mut()?
-                .remove("registries")?
-                .as_table_mut()?
-                .remove(repo_name)?
-                .as_table_mut()?
-                .remove("credential-provider")?)
+            sparse_registries.credential_provider(
+                c.as_table_mut()?
+                    .remove("registries")?
+                    .as_table_mut()?
+                    .remove(repo_name)?
+                    .as_table_mut()?
+                    .remove("credential-provider")?,
+            )
         }) {
         Some(prov) => vec![prov].into(),
         None => sparse_registries.global_credential_providers[..].into(),
     };
     let token_env = if ret.contains(&SparseRegistryAuthProvider::Token) {
-        sparse_registries.registry_tokens_env.get(&CargoConfigEnvironmentNormalisedString::normalise(repo_name.to_string())).map(String::as_str)
+        sparse_registries
+            .registry_tokens_env
+            .get(&CargoConfigEnvironmentNormalisedString::normalise(repo_name.to_string()))
+            .map(String::as_str)
     } else {
         None
     };
-    SparseRegistryAuthProviderBundle(ret,
-                                     cargo,
-                                     repo_name,
-                                     format!("sparse+{}", repo_url).into(),
-                                     token_env,
-                                     sparse_registries.registry_tokens.get(repo_name).map(String::as_str))
+    SparseRegistryAuthProviderBundle(
+        ret,
+        cargo,
+        repo_name,
+        format!("sparse+{}", repo_url).into(),
+        token_env,
+        sparse_registries.registry_tokens.get(repo_name).map(String::as_str),
+    )
 }
 
 /// Update the specified index repository from the specified URL.
@@ -1683,38 +1719,48 @@ pub fn auth_providers<'sr>(crates_file: &Path, install_cargo: Option<&'sr OsStr>
 /// Shoulda stored the blobs verbatim and used `If-Modified-Since`. Too me.
 ///
 /// Only in this mode is the package list used.
-pub fn update_index<W: Write, A: AsRef<str>, I: Iterator<Item = A>>(index_repo: &mut Registry, repo_url: &str, packages: I, http_proxy: Option<&str>,
-                                                                    fork_git: bool, http: &HttpCargoConfig, auth_token: Option<&str>, out: &mut W)
-                                                                    -> Result<(), String> {
-    write!(out,
-           "    {} registry '{}'{}",
-           ["Updating", "Polling"][matches!(index_repo, Registry::Sparse(_)) as usize],
-           repo_url,
-           ["\n", ""][matches!(index_repo, Registry::Sparse(_)) as usize]).and_then(|_| out.flush())
-        .map_err(|e| format!("failed to write updating message: {}", e))?;
+pub fn update_index<W: Write, A: AsRef<str>, I: Iterator<Item = A>>(
+    index_repo: &mut Registry,
+    repo_url: &str,
+    packages: I,
+    http_proxy: Option<&str>,
+    fork_git: bool,
+    http: &HttpCargoConfig,
+    auth_token: Option<&str>,
+    out: &mut W,
+) -> Result<(), String> {
+    write!(
+        out,
+        "    {} registry '{}'{}",
+        ["Updating", "Polling"][matches!(index_repo, Registry::Sparse(_)) as usize],
+        repo_url,
+        ["\n", ""][matches!(index_repo, Registry::Sparse(_)) as usize]
+    )
+    .and_then(|_| out.flush())
+    .map_err(|e| format!("failed to write updating message: {}", e))?;
     match index_repo {
         Registry::Git(index_repo) => {
             if fork_git {
-                Command::new(env::var_os("GIT").as_ref().map(OsString::as_os_str).unwrap_or(OsStr::new("git"))).arg("-C")
+                Command::new(env::var_os("GIT").as_ref().map(OsString::as_os_str).unwrap_or(OsStr::new("git")))
+                    .arg("-C")
                     .arg(index_repo.path())
                     .args(&["fetch", "-f", repo_url, "HEAD:refs/remotes/origin/HEAD"])
                     .status()
                     .map_err(|e| e.to_string())
-                    .and_then(|e| if e.success() {
-                        Ok(())
-                    } else {
-                        Err(e.to_string())
-                    })?;
+                    .and_then(|e| if e.success() { Ok(()) } else { Err(e.to_string()) })?;
             } else {
-                index_repo.remote_anonymous(repo_url)
+                index_repo
+                    .remote_anonymous(repo_url)
                     .and_then(|mut r| {
                         with_authentication(repo_url, |creds| {
                             let mut cb = RemoteCallbacks::new();
                             cb.credentials(|a, b, c| creds(a, b, c));
 
-                            r.fetch(&["HEAD:refs/remotes/origin/HEAD"],
-                                    Some(&mut fetch_options_from_proxy_url_and_callbacks(repo_url, http_proxy, cb)),
-                                    None)
+                            r.fetch(
+                                &["HEAD:refs/remotes/origin/HEAD"],
+                                Some(&mut fetch_options_from_proxy_url_and_callbacks(repo_url, http_proxy, cb)),
+                                None,
+                            )
                         })
                     })
                     .map_err(|e| e.message().to_string())?;
@@ -1728,16 +1774,18 @@ pub fn update_index<W: Write, A: AsRef<str>, I: Iterator<Item = A>>(index_repo: 
             let mut conns: Vec<_> = Result::from_iter(packages.map(|pkg| {
                 let mut conn = CurlEasy::new(SparseHandler(pkg.as_ref().to_string(), vec![], Some(&writussy)));
                 conn.url(&split_package_path(pkg.as_ref()).into_iter().fold(repo_url.to_string(), |mut u, s| {
-                        if !u.ends_with('/') {
-                            u.push('/');
-                        }
-                        u.push_str(&s);
-                        u
-                    }))
-                    .map_err(|e| format!("url: {}", e))?;
+                    if !u.ends_with('/') {
+                        u.push('/');
+                    }
+                    u.push_str(&s);
+                    u
+                }))
+                .map_err(|e| format!("url: {}", e))?;
                 if let Some(auth_token) = auth_token.as_ref() {
                     let mut headers = CurlList::new();
-                    headers.append(&format!("Authorization: {}", auth_token)).map_err(|e| format!("append: {}", e))?;
+                    headers
+                        .append(&format!("Authorization: {}", auth_token))
+                        .map_err(|e| format!("append: {}", e))?;
                     conn.http_headers(headers).map_err(|e| format!("http_headers: {}", e))?;
                 }
                 if let Some(http_proxy) = http_proxy {
@@ -1748,7 +1796,8 @@ pub fn update_index<W: Write, A: AsRef<str>, I: Iterator<Item = A>>(index_repo: 
                 if let Some(cainfo) = http.cainfo.as_ref() {
                     conn.cainfo(cainfo).map_err(|e| format!("cainfo: {}", e))?;
                 }
-                conn.ssl_options(CurlSslOpt::new().no_revoke(!http.check_revoke)).map_err(|e| format!("ssl_options: {}", e))?;
+                conn.ssl_options(CurlSslOpt::new().no_revoke(!http.check_revoke))
+                    .map_err(|e| format!("ssl_options: {}", e))?;
                 sucker.add2(conn).map(|h| (h, Ok(()))).map_err(|e| format!("add2: {}", e))
             }))?;
 
@@ -1756,7 +1805,8 @@ pub fn update_index<W: Write, A: AsRef<str>, I: Iterator<Item = A>>(index_repo: 
                 sucker.wait(&mut [], Duration::from_millis(200)).map_err(|e| format!("wait: {}", e))?;
             }
 
-            writussy.lock()
+            writussy
+                .lock()
                 .map_err(|e| e.to_string())
                 .and_then(|mut out| writeln!(out).map_err(|e| e.to_string()))
                 .map_err(|e| format!("failed to write post-update newline: {}", e))?;
@@ -1812,7 +1862,6 @@ impl<'m, 'w: 'm, W: Write> CurlHandler for SparseHandler<'m, 'w, W> {
     }
 }
 
-
 /// Either an open git repository with a git registry, or a map of (package, sorted versions), populated by
 /// [`update_index()`](fn.update_index.html)
 pub enum Registry {
@@ -1829,16 +1878,14 @@ pub enum RegistryTree<'a> {
 /// Get `FETCH_HEAD` or `origin/HEAD`, then unwrap it to the tree it points to.
 pub fn parse_registry_head(registry_repo: &Registry) -> Result<RegistryTree<'_>, GitError> {
     match registry_repo {
-        Registry::Git(registry_repo) => {
-            registry_repo.revparse_single("FETCH_HEAD")
-                .or_else(|_| registry_repo.revparse_single("origin/HEAD"))
-                .map(|h| h.as_commit().unwrap().tree().unwrap())
-                .map(RegistryTree::Git)
-        }
+        Registry::Git(registry_repo) => registry_repo
+            .revparse_single("FETCH_HEAD")
+            .or_else(|_| registry_repo.revparse_single("origin/HEAD"))
+            .map(|h| h.as_commit().unwrap().tree().unwrap())
+            .map(RegistryTree::Git),
         Registry::Sparse(_) => Ok(RegistryTree::Sparse),
     }
 }
-
 
 fn proxy_options_from_proxy_url<'a>(repo_url: &str, proxy_url: &str) -> ProxyOptions<'a> {
     let mut prx = ProxyOptions::new();
@@ -1884,8 +1931,11 @@ fn fetch_options_from_proxy_url_and_callbacks<'a>(repo_url: &str, proxy_url: Opt
 /// Consult [#107](https://github.com/nabijaczleweli/cargo-update/issues/107) and
 /// the Cargo Book for details: https://doc.rust-lang.org/cargo/reference/source-replacement.html,
 /// https://doc.rust-lang.org/cargo/reference/registries.html.
-pub fn get_index_url(crates_file: &Path, registry: &str, registries_crates_io_protocol_sparse: bool)
-                     -> Result<(Cow<'static, str>, bool, Cow<'static, str>), Cow<'static, str>> {
+pub fn get_index_url(
+    crates_file: &Path,
+    registry: &str,
+    registries_crates_io_protocol_sparse: bool,
+) -> Result<(Cow<'static, str>, bool, Cow<'static, str>), Cow<'static, str>> {
     let mut config_file = crates_file.with_file_name("config");
     let config = if let Ok(cfg) = fs::read_to_string(&config_file).or_else(|_| {
         config_file.set_file_name("config.toml");
@@ -1900,11 +1950,13 @@ pub fn get_index_url(crates_file: &Path, registry: &str, registries_crates_io_pr
                 return Ok((registry.to_string().into(), false, "crates-io".into()));
             }
         } else {
-            Err(format!("Non-crates.io registry specified and no config file found at {} or {}. \
+            Err(format!(
+                "Non-crates.io registry specified and no config file found at {} or {}. \
                          Due to a Cargo limitation we will not be able to install from there \
                          until it's given a [source.NAME] in that file!",
-                        config_file.with_file_name("config").display(),
-                        config_file.display()))?
+                config_file.with_file_name("config").display(),
+                config_file.display()
+            ))?
         }
     };
 
@@ -1913,12 +1965,14 @@ pub fn get_index_url(crates_file: &Path, registry: &str, registries_crates_io_pr
     let mut cur_source = Cow::from(registry);
 
     // Special case, always present
-    registries.insert("crates-io",
-                      Cow::from(if registries_crates_io_protocol_sparse {
-                          "sparse+https://index.crates.io/"
-                      } else {
-                          "https://github.com/rust-lang/crates.io-index"
-                      }));
+    registries.insert(
+        "crates-io",
+        Cow::from(if registries_crates_io_protocol_sparse {
+            "sparse+https://index.crates.io/"
+        } else {
+            "https://github.com/rust-lang/crates.io-index"
+        }),
+    );
     if cur_source == "https://github.com/rust-lang/crates.io-index" || cur_source == "sparse+https://index.crates.io/" {
         cur_source = "crates-io".into();
     }
@@ -1926,17 +1980,20 @@ pub fn get_index_url(crates_file: &Path, registry: &str, registries_crates_io_pr
     if let Some(source) = config.get("source") {
         for (name, v) in source.as_table().ok_or("source not table")? {
             if let Some(replacement) = v.get("replace-with") {
-                replacements.insert(&name[..],
-                                    replacement.as_str().ok_or_else(|| format!("source.{}.replacement not string", name))?);
+                replacements.insert(
+                    &name[..],
+                    replacement.as_str().ok_or_else(|| format!("source.{}.replacement not string", name))?,
+                );
             }
 
             if let Some(url) = v.get("registry") {
-                let url = url.as_str().ok_or_else(|| format!("source.{}.registry not string", name))?.to_string().into();
-                if cur_source == url {
+                let url: &str = url.as_str().ok_or_else(|| format!("source.{}.registry not string", name))?;
+                let _url: Cow<_> = url.strip_prefix("sparse+").unwrap_or(url).into();
+                if cur_source == _url {
                     cur_source = name.into();
                 }
 
-                registries.insert(&name[..], url);
+                registries.insert(&name[..], url.into());
             }
         }
     }
@@ -1951,26 +2008,37 @@ pub fn get_index_url(crates_file: &Path, registry: &str, registries_crates_io_pr
         }
     }
 
-    if Url::parse(&cur_source).is_ok() {
-        Err(format!("Non-crates.io registry specified and {} couldn't be found in the config file at {}. \
-                     Due to a Cargo limitation we will not be able to install from there \
-                     until it's given a [source.NAME] in that file!",
-                    cur_source,
-                    config_file.display()))?
-    }
-
     while let Some(repl) = replacements.get(&cur_source[..]) {
         cur_source = Cow::from(&repl[..]);
     }
 
-    registries.get(&cur_source[..])
-        .map(|reg| (reg.strip_prefix("sparse+").unwrap_or(reg).to_string().into(), reg.starts_with("sparse+"), cur_source.to_string().into()))
+    if Url::parse(&cur_source).is_ok() {
+        Err(format!(
+            "Non-crates.io registry specified and {} couldn't be found in the config file at {}. \
+                     Due to a Cargo limitation we will not be able to install from there \
+                     until it's given a [source.NAME] in that file!",
+            cur_source,
+            config_file.display()
+        ))?
+    }
+
+    registries
+        .get(&cur_source[..])
+        .map(|reg| {
+            (
+                reg.strip_prefix("sparse+").unwrap_or(reg).to_string().into(),
+                reg.starts_with("sparse+"),
+                cur_source.to_string().into(),
+            )
+        })
         .ok_or_else(|| {
-            format!("Couldn't find appropriate source URL for {} in {} (resolved to {:?})",
-                    registry,
-                    config_file.display(),
-                    cur_source)
-                .into()
+            format!(
+                "Couldn't find appropriate source URL for {} in {} (resolved to {:?})",
+                registry,
+                config_file.display(),
+                cur_source
+            )
+            .into()
         })
 }
 
@@ -1982,7 +2050,8 @@ pub fn get_index_url(crates_file: &Path, registry: &str, registries_crates_io_pr
 /// https://github.com/rust-lang/cargo/blob/5102de2b7de997b03181063417f20874a06a67c0/src/cargo/sources/git/utils.rs#L437
 /// (see that link for full comments)
 fn with_authentication<T, F>(url: &str, mut f: F) -> Result<T, GitError>
-    where F: FnMut(&mut git2::Credentials) -> Result<T, GitError>
+where
+    F: FnMut(&mut git2::Credentials) -> Result<T, GitError>,
 {
     let cfg = GitConfig::open_default().unwrap();
 
@@ -2023,11 +2092,13 @@ fn with_authentication<T, F>(url: &str, mut f: F) -> Result<T, GitError>
     if ssh_username_requested {
         // NOTE: this is the only divergence from the original cargo code: we also try cfg["user.name"]
         //       see https://github.com/nabijaczleweli/cargo-update/issues/110#issuecomment-533091965 for explanation
-        for uname in cred_helper.username
+        for uname in cred_helper
+            .username
             .into_iter()
             .chain(cfg.get_string("user.name"))
             .chain(["USERNAME", "USER"].iter().flat_map(env::var))
-            .chain(Some("git".to_string())) {
+            .chain(Some("git".to_string()))
+        {
             let mut ssh_attempts = 0;
 
             res = f(&mut |_, _, allowed| {
@@ -2081,7 +2152,6 @@ fn with_authentication<T, F>(url: &str, mut f: F) -> Result<T, GitError>
         Err(GitError::from_str(&msg))
     }
 }
-
 
 /// Split and lower-case `cargo-update` into `[ca, rg, cargo-update]`, `jot` into `[3, j, jot]`, &c.
 pub fn split_package_path(cratename: &str) -> Vec<Cow<'_, str>> {
@@ -2155,12 +2225,12 @@ pub fn find_package_data<'t>(cratename: &str, registry: &Tree<'t>, registry_pare
 /// ```
 pub fn find_proxy(crates_file: &Path) -> Option<String> {
     if let Ok(crates_file) = fs::read_to_string(crates_file) {
-        if let Some(toml::Value::String(proxy)) =
-            toml::from_str::<toml::Value>(&crates_file)
-                .unwrap()
-                .get_mut("http")
-                .and_then(|t| t.as_table_mut())
-                .and_then(|t| t.remove("proxy")) {
+        if let Some(toml::Value::String(proxy)) = toml::from_str::<toml::Value>(&crates_file)
+            .unwrap()
+            .get_mut("http")
+            .and_then(|t| t.as_table_mut())
+            .and_then(|t| t.remove("proxy"))
+        {
             if !proxy.is_empty() {
                 return Some(proxy);
             }
@@ -2175,7 +2245,11 @@ pub fn find_proxy(crates_file: &Path) -> Option<String> {
         }
     }
 
-    ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"].iter().flat_map(env::var).filter(|proxy| !proxy.is_empty()).next()
+    ["http_proxy", "HTTP_PROXY", "https_proxy", "HTTPS_PROXY"]
+        .iter()
+        .flat_map(env::var)
+        .filter(|proxy| !proxy.is_empty())
+        .next()
 }
 
 /// Find the bare git repository in the specified directory for the specified crate
@@ -2186,20 +2260,21 @@ pub fn find_proxy(crates_file: &Path) -> Option<String> {
 /// [`{last_url_segment || "_empty"}-{hash(url)}`]
 /// (https://github.com/rust-lang/cargo/blob/74f2b400d2be43da798f99f94957d359bc223988/src/cargo/sources/git/source.rs#L62-L73)
 pub fn find_git_db_repo(git_db_dir: &Path, url: &str) -> Option<PathBuf> {
-    let path = git_db_dir.join(format!("{}-{}",
-                                       match Url::parse(url)
-                                           .ok()?
-                                           .path_segments()
-                                           .and_then(|mut segs| segs.next_back())
-                                           .unwrap_or("") {
-                                           "" => "_empty",
-                                           url => url,
-                                       },
-                                       cargo_hash(url)));
+    let path = git_db_dir.join(format!(
+        "{}-{}",
+        match Url::parse(url).ok()?.path_segments().and_then(|mut segs| segs.next_back()).unwrap_or("") {
+            "" => "_empty",
+            url => url,
+        },
+        cargo_hash(url)
+    ));
 
-    if path.is_dir() { Some(path) } else { None }
+    if path.is_dir() {
+        Some(path)
+    } else {
+        None
+    }
 }
-
 
 /// The short filesystem name for the repository, as used by `cargo`
 ///
@@ -2218,9 +2293,15 @@ pub fn registry_shortname(url: &str) -> String {
         }
     }
 
-    format!("{}-{}",
-            Url::parse(url).map_err(|e| format!("{} not an URL: {}", url, e)).unwrap().host_str().unwrap_or(""),
-            cargo_hash(RegistryHash(url)))
+    format!(
+        "{}-{}",
+        Url::parse(url)
+            .map_err(|e| format!("{} not an URL: {}", url, e))
+            .unwrap()
+            .host_str()
+            .unwrap_or(""),
+        cargo_hash(RegistryHash(url))
+    )
 }
 
 /// Stolen from and equivalent to `short_hash()` from
@@ -2232,14 +2313,16 @@ pub fn cargo_hash<T: Hash>(whom: T) -> String {
     let mut hasher = SipHasher::new_with_keys(0, 0);
     whom.hash(&mut hasher);
     let hash = hasher.finish();
-    hex::encode(&[(hash >> 0) as u8,
-                  (hash >> 8) as u8,
-                  (hash >> 16) as u8,
-                  (hash >> 24) as u8,
-                  (hash >> 32) as u8,
-                  (hash >> 40) as u8,
-                  (hash >> 48) as u8,
-                  (hash >> 56) as u8])
+    hex::encode(&[
+        (hash >> 0) as u8,
+        (hash >> 8) as u8,
+        (hash >> 16) as u8,
+        (hash >> 24) as u8,
+        (hash >> 32) as u8,
+        (hash >> 40) as u8,
+        (hash >> 48) as u8,
+        (hash >> 56) as u8,
+    ])
 }
 
 /// These two are stolen verbatim from
@@ -2263,7 +2346,6 @@ enum GitReference {
     Branch(String),
     Rev(String),
 }
-
 
 trait SemverExt {
     fn is_prerelease(&self) -> bool;

@@ -68,6 +68,7 @@ pub enum ConfigOperation {
 /// configuration.insert("cargo_update".to_string(), PackageConfig::from(&operations));
 /// PackageConfig::write(&configuration, &config_file).unwrap();
 /// ```
+#[allow(clippy::derived_hash_with_manual_eq)]
 #[derive(Debug, Clone, Hash, Eq, Serialize, Deserialize)]
 pub struct PackageConfig {
     /// Toolchain to use to compile the package, or `None` for default.
