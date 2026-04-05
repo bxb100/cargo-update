@@ -16,6 +16,7 @@ use self::super::ops::{PackageFilterElement, ConfigOperation};
 use semver::{VersionReq as SemverReq, Version as Semver};
 use clap::{AppSettings, SubCommand, App, Arg};
 use std::num::{ParseIntError, NonZero};
+use chrono::{TimeDelta, DateTime, Utc};
 use std::ffi::{OsString, OsStr};
 use std::path::{PathBuf, Path};
 use std::fmt::Arguments;
@@ -49,6 +50,8 @@ pub struct Options {
     /// Enforce packages' embedded `Cargo.lock`. Exactly like `CARGO_INSTALL_OPTS=--locked` (or `--enforce-lock` per package)
     /// except doesn't disable cargo-binstall. Default: `false`
     pub locked: bool,
+    /// Only install versions released after this time. Default: `None`
+    pub released_after: Option<DateTime<Utc>>,
     /// Update all packages. Default: empty
     pub filter: Vec<PackageFilterElement>,
     /// The `cargo` home directory; (original, canonicalised). Default: `"$CARGO_INSTALL_ROOT"`, then `"$CARGO_HOME"`,
@@ -106,6 +109,9 @@ impl Options {
                         Arg::from_usage("-g --git 'Also update git packages'"),
                         Arg::from_usage("-q --quiet 'No output printed to stdout'"),
                         Arg::from_usage("--locked 'Enforce packages' embedded Cargo.lock'"),
+                        Arg::from_usage("--cooldown=[TIME] 'Only consider versions released before (now - TIME). Seconds, [smhdwy] suffix.'")
+                            .number_of_values(1)
+                            .validator(|s| duration_parse(&s).map(|_| ())),
                         Arg::from_usage("-s --filter=[PACKAGE_FILTER]... 'Specify a filter a package must match to be considered'")
                             .number_of_values(1)
                             .validator(|s| PackageFilterElement::parse(&s).map(|_| ())),
@@ -165,6 +171,12 @@ impl Options {
             downdate: matches.is_present("downdate"),
             update_git: matches.is_present("git"),
             quiet: matches.is_present("quiet"),
+            released_after: matches.value_of("cooldown")
+                .map(|cd| duration_parse(cd).unwrap())
+                .map(|td| match Utc::now().checked_sub_signed(td) {
+                    Some(ra) => ra,
+                    None => clerror(format_args!("--cooldown {}: (now - {}) out of range", matches.value_of("cooldown").unwrap(), td)),
+                }),
             locked: matches.is_present("locked"),
             filter: matches.values_of("filter").map(|pfs| pfs.flat_map(PackageFilterElement::parse).collect()).unwrap_or_default(),
             cargo_dir: cargo_dir(matches.value_of_os("cargo-dir")),
@@ -344,6 +356,16 @@ fn package_parse(mut s: &str) -> Result<(&str, Option<Semver>, Option<&str>), St
     } else {
         Ok((s, None, registry_url))
     }
+}
+
+fn duration_parse(s: &str) -> Result<TimeDelta, String> {
+    const MULS_S: [char; 6] = ['y', 'w', 'd', 'h', 'm', 's'];
+    const MULS_V: [f64; 6] = [365.25 / 7., 7., 24., 60., 60., 1.];
+    let (base, mul) = s.strip_suffix(MULS_S).map(|stripped| (stripped, *s.as_bytes().last().unwrap() as _)).unwrap_or((s, 's'));
+    let base = f64::from_str(base).map_err(|e| e.to_string())?;
+    let val = MULS_V[MULS_S.iter().position(|&c| c == mul).unwrap()..].iter().fold(base, |a, e| a * e);
+    let (s, ns) = (val.trunc() as i64, (val.fract() * 1_000_000_000.0) as u32);
+    TimeDelta::new(s, ns).ok_or_else(|| format!("{}.{:09} too big", s, ns))
 }
 
 fn jobs_parse(s: &str, special: &str, default: NonZero<usize>) -> Result<NonZero<usize>, ParseIntError> {

@@ -392,6 +392,7 @@ extern crate serde_derive;
 extern crate serde_json;
 #[cfg(target_os = "windows")]
 extern crate windows;
+extern crate chrono;
 extern crate semver;
 extern crate whoami;
 extern crate serde;

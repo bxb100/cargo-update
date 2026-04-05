@@ -71,6 +71,11 @@ version = "0.61"
 default-features = false
 features = ["Win32_Security_Credentials"]
 
+[dependencies.chrono]
+version = "0.4"
+default-features = false
+features = ["now"]
+
 [dependencies.semver]
 version = "1.0"
 features = ["serde"]

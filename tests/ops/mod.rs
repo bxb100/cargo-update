@@ -34,12 +34,12 @@ fn intersect_packages() {
 #[test]
 fn crate_versions() {
     assert_eq!(ops::crate_versions(&fs::read("test-data/checksums-versions.json").unwrap()).unwrap(),
-               vec![Semver::parse("0.2.0").unwrap(),
-                    Semver::parse("0.2.1").unwrap(),
-                    Semver::parse("0.3.0").unwrap(),
-                    Semver::parse("0.4.0").unwrap(),
-                    Semver::parse("0.4.1").unwrap(),
-                    Semver::parse("0.5.0").unwrap(),
-                    Semver::parse("0.5.1").unwrap(),
-                    Semver::parse("0.5.2").unwrap()]);
+               vec![(Semver::parse("0.2.0").unwrap(), None),
+                    (Semver::parse("0.2.1").unwrap(), None),
+                    (Semver::parse("0.3.0").unwrap(), None),
+                    (Semver::parse("0.4.0").unwrap(), None),
+                    (Semver::parse("0.4.1").unwrap(), None),
+                    (Semver::parse("0.5.0").unwrap(), None),
+                    (Semver::parse("0.5.1").unwrap(), None),
+                    (Semver::parse("0.5.2").unwrap(), Some(chrono::DateTime::parse_from_rfc3339("2016-09-21T19:20:47Z").unwrap()))]);
 }

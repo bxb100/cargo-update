@@ -163,7 +163,7 @@ fn actual_main() -> Result<(), i32> {
         };
 
         let install_prereleases = configuration.get(&package.name).and_then(|c| c.install_prereleases);
-        package.pull_version(&latest_registries[registry_idx], &registry_repos[registry_idx], install_prereleases);
+        package.pull_version(&latest_registries[registry_idx], &registry_repos[registry_idx], install_prereleases, opts.released_after);
     }
 
     if !opts.quiet {

@@ -17,6 +17,7 @@ use windows::Win32::Security::Credentials as WinCred;
 use std::io::{self, ErrorKind as IoErrorKind, BufWriter, BufReader, BufRead, Write};
 use std::collections::{BTreeMap, BTreeSet};
 use std::{slice, cmp, env, mem, str, fs};
+use chrono::{FixedOffset, DateTime, Utc};
 use curl::multi::{Multi as CurlMulti, Easy2Handle as CurlEasyHandle};
 use std::process::{Command, Stdio};
 use std::ffi::{OsString, OsStr};
@@ -280,7 +281,8 @@ impl RegistryPackage {
     }
 
     /// Read the version list for this crate off the specified repository tree and set the latest and alternative versions.
-    pub fn pull_version(&mut self, registry: &RegistryTree, registry_parent: &Registry, install_prereleases: Option<bool>) {
+    pub fn pull_version(&mut self, registry: &RegistryTree, registry_parent: &Registry, install_prereleases: Option<bool>,
+                        released_after: Option<DateTime<Utc>>) {
         let mut vers_git;
         let vers = match (registry, registry_parent) {
             (RegistryTree::Git(registry), Registry::Git(registry_parent)) => {
@@ -298,7 +300,14 @@ impl RegistryPackage {
         self.newest_version = None;
         self.alternative_version = None;
 
-        let mut vers = vers.iter().rev();
+        let mut vers = vers.iter()
+            .rev()
+            .filter(|(_, dt)| match (dt, released_after) {
+                (_, None) => true,
+                (None, Some(_)) => false,
+                (Some(dt), Some(ra)) => ra > *dt,
+            })
+            .map(|(v, _)| v);
         if let Some(newest) = vers.next() {
             self.newest_version = Some(newest.clone());
 
@@ -1285,7 +1294,7 @@ pub fn intersect_packages(installed: &[RegistryPackage], to_update: &[(String, O
         .collect()
 }
 
-/// Parse the raw crate descriptor from the repository into a collection of `Semver`s.
+/// Parse the raw crate descriptor from the repository into a collection of `Semver`s and publication times (if present).
 ///
 /// # Examples
 ///
@@ -1297,14 +1306,17 @@ pub fn intersect_packages(installed: &[RegistryPackage], to_update: &[(String, O
 /// let versions = crate_versions(&fs::read(desc_path).unwrap()).expect(package);
 ///
 /// println!("Released versions of checksums:");
-/// for ver in &versions {
-///     println!("  {}", ver);
+/// for (ver, pubtime) in &versions {
+///     match pubtime {
+///         None          => println!("  {}",      ver),
+///         Some(pubtime) => println!("  {} ({})", ver, pubtime),
+///     }
 /// }
 /// ```
-pub fn crate_versions(buf: &[u8]) -> Result<Vec<Semver>, Cow<'static, str>> {
+pub fn crate_versions(buf: &[u8]) -> Result<Vec<(Semver, Option<DateTime<FixedOffset>>)>, Cow<'static, str>> {
     buf.split_inclusive(|&b| b == b'\n').map(crate_version_line).flat_map(Result::transpose).collect()
 }
-fn crate_version_line(line: &[u8]) -> Result<Option<Semver>, Cow<'static, str>> {
+fn crate_version_line(line: &[u8]) -> Result<Option<(Semver, Option<DateTime<FixedOffset>>)>, Cow<'static, str>> {
     if line == b"\n" {
         return Ok(None);
     }
@@ -1315,11 +1327,17 @@ fn crate_version_line(line: &[u8]) -> Result<Option<Semver>, Cow<'static, str>> 
             }
 
             let v = match o.get("vers").ok_or("no \"vers\" key")? {
-                json::Value::String(ref v) => v,
+                json::Value::String(ref v) => Semver::parse(&v).map_err(|e| e.to_string())?,
                 _ => return Err("\"vers\" not string".into()),
             };
 
-            Ok(Some(Semver::parse(&v).map_err(|e| e.to_string())?))
+            let pt = match o.get("pubtime") {
+                None => None,
+                Some(json::Value::String(ref pt)) => Some(DateTime::parse_from_rfc3339(pt).map_err(|e| e.to_string())?),
+                Some(_) => return Err("\"pubtime\" not string".into()),
+            };
+
+            Ok(Some((v, pt)))
         }
         _ => Err("line not object".into()),
     }
@@ -1843,9 +1861,11 @@ pub fn update_index<W: Write, A: AsRef<str>, I: Iterator<Item = A>>(index_repo: 
 
     Ok(())
 }
-
 // TODO: Mutex wants to be nonpoison
-struct SparseHandler<'m, 'w: 'm, W: Write>(String, Result<(Vec<Semver>, Vec<u8>), Cow<'static, str>>, &'m Mutex<&'w mut W>, Option<u8>);
+struct SparseHandler<'m, 'w: 'm, W: Write>(String,
+                                           Result<(Vec<(Semver, Option<DateTime<FixedOffset>>)>, Vec<u8>), Cow<'static, str>>,
+                                           &'m Mutex<&'w mut W>,
+                                           Option<u8>);
 
 impl<'m, 'w: 'm, W: Write> CurlHandler for SparseHandler<'m, 'w, W> {
     fn write(&mut self, data: &[u8]) -> Result<usize, CurlWriteError> {
@@ -1890,7 +1910,7 @@ impl<'m, 'w: 'm, W: Write> CurlHandler for SparseHandler<'m, 'w, W> {
 /// [`update_index()`](fn.update_index.html)
 pub enum Registry {
     Git(Repository),
-    Sparse(BTreeMap<String, Vec<Semver>>),
+    Sparse(BTreeMap<String, Vec<(Semver, Option<DateTime<FixedOffset>>)>>),
 }
 
 /// A git tree corresponding to the latest revision of a git registry.
